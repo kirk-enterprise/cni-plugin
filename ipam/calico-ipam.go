@@ -78,7 +78,8 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return err
 	}
 
-	workloadID, _, err := utils.GetIdentifiers(args)
+	//workloadID, _, err := utils.GetIdentifiers(args)
+	workloadID, _, err := getKeWorkloadID(args)
 	if err != nil {
 		return err
 	}
@@ -191,6 +192,51 @@ func cmdAdd(args *skel.CmdArgs) error {
 }
 
 func cmdDel(args *skel.CmdArgs) error {
+
+	err := keCmdDel(args)
+	if err != nil {
+		return err
+	}
+	return calicoCmdDel(args)
+}
+
+func keCmdDel(args *skel.CmdArgs) error {
+	conf := utils.NetConf{}
+	if err := json.Unmarshal(args.StdinData, &conf); err != nil {
+		return fmt.Errorf("failed to load netconf: %v", err)
+	}
+
+	utils.ConfigureLogging(conf.LogLevel)
+
+	calicoClient, err := utils.CreateClient(conf)
+	if err != nil {
+		return err
+	}
+
+	// Release the IP address by using the handle - which is workloadID.
+	//workloadID, _, err := utils.GetIdentifiers(args)
+	workloadID, _, err := getKeWorkloadID(args)
+	if err != nil {
+		return err
+	}
+
+	logger := utils.CreateContextLogger(workloadID)
+
+	logger.Info("Releasing address using ke workloadID")
+	if err := calicoClient.IPAM().ReleaseByHandle(workloadID); err != nil {
+		if _, ok := err.(errors.ErrorResourceDoesNotExist); ok {
+			logger.WithField("workloadId", workloadID).Warn("Asked to release address but it doesn't exist. Ignoring")
+			return nil
+		}
+		return err
+	}
+
+	logger.Info("Released address using ke workloadID")
+	return nil
+
+}
+
+func calicoCmdDel(args *skel.CmdArgs) error {
 	conf := utils.NetConf{}
 	if err := json.Unmarshal(args.StdinData, &conf); err != nil {
 		return fmt.Errorf("failed to load netconf: %v", err)
@@ -223,4 +269,21 @@ func cmdDel(args *skel.CmdArgs) error {
 	logger.Info("Released address using workloadID")
 	return nil
 
+}
+
+func getKeWorkloadID(args *skel.CmdArgs) (workloadID string, orchestratorID string, err error) {
+	// Determine if running under k8s by checking the CNI args
+	k8sArgs := utils.K8sArgs{}
+	if err = types.LoadArgs(args.Args, &k8sArgs); err != nil {
+		return workloadID, orchestratorID, err
+	}
+
+	if string(k8sArgs.K8S_POD_NAMESPACE) != "" && string(k8sArgs.K8S_POD_NAME) != "" {
+		workloadID = fmt.Sprintf("%s.%s.%s", k8sArgs.K8S_POD_NAMESPACE, k8sArgs.K8S_POD_NAME, args.ContainerID)
+		orchestratorID = "k8s"
+	} else {
+		workloadID = args.ContainerID
+		orchestratorID = "cni"
+	}
+	return workloadID, orchestratorID, nil
 }
